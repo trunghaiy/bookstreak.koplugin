@@ -23,14 +23,21 @@ function Sync:_getDbPath()
 end
 
 function Sync:_getDeviceInfo()
-    local device = require("device")
-    return device:info(), device:getDeviceId() or "unknown"
+    local Device = require("device")
+    local device_name = Device:info() or "unknown"
+    local device_id = self.settings:get("device_id")
+    if not device_id or device_id == "" then
+        device_id = ("%s-%08x"):format(device_name:gsub("%s+", ""), math.random(0, 0xFFFFFFFF))
+        self.settings:set("device_id", device_id)
+        self.settings:flush()
+    end
+    return device_name, device_id
 end
 
 function Sync:_queryNewPageStats(since_timestamp)
     local db_path = self:_getDbPath()
 
-    local ok_open, conn = pcall(SQ3.open, db_path, "ro")
+    local ok_open, conn = pcall(SQ3.open, db_path, "rw")
     if not ok_open or not conn then
         logger.warn("BookStreak: Cannot open statistics.sqlite3")
         return nil
@@ -49,19 +56,18 @@ function Sync:_queryNewPageStats(since_timestamp)
         stmt:bind(since_timestamp)
         for row in stmt:rows() do
             table.insert(results, {
-                id_book = row[1],
-                page = row[2],
-                start_time = row[3],
-                duration = row[4],
-                total_pages = row[5],
-                title = row[6],
-                authors = row[7],
-                pages = row[8],
-                series = row[9],
-                md5 = row[10],
+                id_book = tonumber(row[1]),
+                page = tonumber(row[2]),
+                start_time = tonumber(row[3]),
+                duration = tonumber(row[4]),
+                total_pages = tonumber(row[5]),
+                title = tostring(row[6] or ""),
+                authors = tostring(row[7] or ""),
+                pages = tonumber(row[8]),
+                series = row[9] and tostring(row[9]) or nil,
+                md5 = row[10] and tostring(row[10]) or nil,
             })
         end
-        stmt:close()
         return results
     end)
 
@@ -95,6 +101,11 @@ function Sync:_groupByBook(rows)
             table.insert(book_order, md5)
         end
 
+        -- Prefer psd.total_pages (reflow-accurate) over book.pages (static)
+        if row.total_pages and row.total_pages > 0 then
+            books[md5].pages = row.total_pages
+        end
+
         table.insert(books[md5].page_stats, {
             page = row.page,
             start_time = row.start_time,
@@ -111,7 +122,7 @@ function Sync:_groupByDate(page_stats)
     local date_order = {}
 
     for _, ps in ipairs(page_stats) do
-        local date_str = os.date("%Y-%m-%d", ps.start_time)
+        local date_str = os.date("%Y-%m-%d", tonumber(ps.start_time))
         if not dates[date_str] then
             dates[date_str] = {}
             table.insert(date_order, date_str)
@@ -161,12 +172,15 @@ function Sync:_buildPayload(books, book_order, since_timestamp)
             annotations = self:_getAnnotationsForBook(b.md5, since_timestamp)
         end
 
+        local isbn = self:_getIsbnForBook(b.md5)
+
         table.insert(book_entries, {
             md5 = b.md5,
             title = b.title,
             authors = b.authors,
             pages = b.pages,
             series = b.series,
+            isbn = isbn,
             sessions = sessions,
             annotations = annotations,
         })
@@ -181,37 +195,88 @@ function Sync:_buildPayload(books, book_order, since_timestamp)
 end
 
 function Sync:_getAnnotationsForBook(md5, since_timestamp)
-    -- Look up file path from KOReader's doc settings via statistics DB
-    local db_path = self:_getDbPath()
-    local ok_open, conn = pcall(SQ3.open, db_path, "ro")
-    if not ok_open or not conn then return {} end
-
-    -- The statistics DB doesn't store file paths directly.
-    -- We need to find the book's sidecar via KOReader's history/doc settings.
-    -- For now, check the DocSettings registry.
-    conn:close()
-
     local DocSettings = require("docsettings")
-    local doc_path = DocSettings:getPathFromMd5(md5)
-    if not doc_path then return {} end
 
-    return self.sidecar_reader:getAnnotations(doc_path, since_timestamp)
+    local history_path = DataStorage:getDataDir() .. "/history.lua"
+    local ok_load, history = pcall(dofile, history_path)
+    if not ok_load or type(history) ~= "table" then return {} end
+
+    for _, entry in ipairs(history) do
+        local file_path = entry.file
+        if file_path then
+            local ok, doc_sidecar = pcall(DocSettings.open, DocSettings, file_path)
+            if ok and doc_sidecar then
+                local doc_md5 = doc_sidecar:readSetting("partial_md5_checksum")
+                if doc_md5 == md5 then
+                    return self.sidecar_reader:getAnnotations(file_path, since_timestamp)
+                end
+            end
+        end
+    end
+
+    return {}
 end
 
-function Sync:syncAll()
+function Sync:_getIsbnForBook(md5)
+    local DocSettings = require("docsettings")
+
+    local history_path = DataStorage:getDataDir() .. "/history.lua"
+    local ok_load, history = pcall(dofile, history_path)
+    if not ok_load or type(history) ~= "table" then return nil end
+
+    for _, entry in ipairs(history) do
+        local file_path = entry.file
+        if file_path then
+            local ok, doc_sidecar = pcall(DocSettings.open, DocSettings, file_path)
+            if ok and doc_sidecar then
+                local doc_md5 = doc_sidecar:readSetting("partial_md5_checksum")
+                if doc_md5 == md5 then
+                    local doc_props = doc_sidecar:readSetting("doc_props")
+                    if type(doc_props) == "table" then
+                        -- KOReader stores identifiers as a table: {isbn = "978...", uuid = "..."}
+                        if doc_props.identifiers and type(doc_props.identifiers) == "table" then
+                            local isbn_val = doc_props.identifiers.isbn or doc_props.identifiers.ISBN
+                            if isbn_val and tostring(isbn_val) ~= "" then
+                                return tostring(isbn_val):gsub("-", "")
+                            end
+                        end
+                        -- Fall back to identifiers as a string (e.g. "ISBN:978-0-307-46376-0")
+                        if doc_props.identifiers and type(doc_props.identifiers) == "string" then
+                            local isbn = doc_props.identifiers:lower():match("isbn:(%d[%dxx-]+)")
+                            if isbn then return isbn:gsub("-", "") end
+                        end
+                        -- Fall back to direct isbn field
+                        if doc_props.isbn and doc_props.isbn ~= "" then
+                            return tostring(doc_props.isbn):gsub("-", "")
+                        end
+                    end
+                    return nil
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+function Sync:syncAll(full)
     if not self.settings:isConfigured() then
         return { ok = false, error = "Not configured" }
     end
 
-    local since = self.settings:getLastSyncTime()
+    local since = full and 0 or self.settings:getLastSyncTime()
+    logger.info("BookStreak: syncAll since_timestamp =", since, "full =", full or false)
+
     local rows = self:_queryNewPageStats(since)
 
     if not rows then
+        logger.warn("BookStreak: syncAll — query returned nil (DB error)")
         return { ok = false, error = "Failed to read statistics database" }
     end
 
+    logger.info("BookStreak: syncAll — found", #rows, "new page stat rows")
+
     if #rows == 0 then
-        -- Nothing new, but try flushing the queue
         if NetworkMgr:isOnline() then
             self.queue:flush()
         end
@@ -221,49 +286,81 @@ function Sync:syncAll()
     local books, book_order = self:_groupByBook(rows)
     local payload = self:_buildPayload(books, book_order, since)
 
+    logger.info("BookStreak: syncAll — payload:",
+        #payload.books, "books")
+    for _, b in ipairs(payload.books) do
+        local session_count = 0
+        local page_count = 0
+        local sessions = type(b.sessions) == "table" and b.sessions or {}
+        for _, s in ipairs(sessions) do
+            session_count = session_count + 1
+            local pages = type(s.pages) == "table" and s.pages or {}
+            page_count = page_count + #pages
+        end
+        local ann_count = type(b.annotations) == "table" and #b.annotations or 0
+        logger.info("BookStreak:   book:", b.title, "md5:", b.md5,
+            "sessions:", session_count, "pages:", page_count,
+            "annotations:", ann_count)
+    end
+
     if not NetworkMgr:isOnline() then
         self.queue:enqueue(payload)
         return { ok = true, queued = true, books_synced = 0, sessions_created = 0, annotations_created = 0 }
     end
 
-    local result = self.api:post(payload)
+    local timeout = full and 120 or 30
+    local result = self.api:post(payload, timeout)
     if result and result.status == "ok" then
+        logger.info("BookStreak: syncAll — server response: books_synced =",
+            result.books_synced, "sessions_created =", result.sessions_created,
+            "annotations_created =", result.annotations_created)
         self.settings:recordSync(
             result.server_time or os.time(),
             result.books_synced or 0,
             result.sessions_created or 0
         )
-        -- Also flush any previously queued payloads
         self.queue:flush()
         return {
             ok = true,
             books_synced = result.books_synced or 0,
+            books_unlinked = result.books_unlinked or 0,
             sessions_created = result.sessions_created or 0,
             annotations_created = result.annotations_created or 0,
         }
     else
+        logger.warn("BookStreak: syncAll — post failed, queuing payload")
         self.queue:enqueue(payload)
         return { ok = false, queued = true, error = "Sync failed, payload queued" }
     end
 end
 
 function Sync:syncBook(book_path)
-    -- Sync only the current book (used on document close)
     if not self.settings:isConfigured() then return { ok = false } end
 
     local since = self.settings:getLastSyncTime()
+    logger.info("BookStreak: syncBook path =", book_path, "since =", since)
 
-    -- Get this book's md5 from DocSettings
     local DocSettings = require("docsettings")
-    local doc_settings = DocSettings:open(book_path)
-    if not doc_settings then return { ok = false } end
+    local ok_open, doc_settings = pcall(DocSettings.open, DocSettings, book_path)
+    if not ok_open or not doc_settings then
+        logger.warn("BookStreak: syncBook — failed to open DocSettings for", book_path)
+        return { ok = false }
+    end
 
-    local stats = doc_settings:readSetting("stats")
-    local md5 = stats and stats.md5
-    if not md5 then return { ok = false } end
+    local md5 = doc_settings:readSetting("partial_md5_checksum")
+    if not md5 then
+        logger.warn("BookStreak: syncBook — no partial_md5_checksum for", book_path)
+        return { ok = false }
+    end
+    logger.info("BookStreak: syncBook md5 =", md5)
 
     local rows = self:_queryNewPageStats(since)
-    if not rows then return { ok = false } end
+    if not rows then
+        logger.warn("BookStreak: syncBook — query returned nil")
+        return { ok = false }
+    end
+
+    logger.info("BookStreak: syncBook — total rows from DB:", #rows)
 
     -- Filter to just this book's md5
     local book_rows = {}
@@ -273,10 +370,30 @@ function Sync:syncBook(book_path)
         end
     end
 
-    if #book_rows == 0 then return { ok = true, books_synced = 0 } end
+    logger.info("BookStreak: syncBook — rows matching md5:", #book_rows)
+
+    if #book_rows == 0 then
+        logger.info("BookStreak: syncBook — no new data for this book")
+        return { ok = true, books_synced = 0 }
+    end
 
     local books, book_order = self:_groupByBook(book_rows)
     local payload = self:_buildPayload(books, book_order, since)
+
+    for _, b in ipairs(payload.books) do
+        local session_count = 0
+        local page_count = 0
+        local sessions = type(b.sessions) == "table" and b.sessions or {}
+        for _, s in ipairs(sessions) do
+            session_count = session_count + 1
+            local pages = type(s.pages) == "table" and s.pages or {}
+            page_count = page_count + #pages
+        end
+        local ann_count = type(b.annotations) == "table" and #b.annotations or 0
+        logger.info("BookStreak: syncBook payload — book:", b.title,
+            "sessions:", session_count, "page_entries:", page_count,
+            "annotations:", ann_count)
+    end
 
     if not NetworkMgr:isOnline() then
         self.queue:enqueue(payload)
@@ -285,6 +402,9 @@ function Sync:syncBook(book_path)
 
     local result = self.api:post(payload)
     if result and result.status == "ok" then
+        logger.info("BookStreak: syncBook — server: books_synced =",
+            result.books_synced, "sessions_created =", result.sessions_created,
+            "annotations_created =", result.annotations_created)
         self.settings:recordSync(
             result.server_time or os.time(),
             result.books_synced or 0,
@@ -292,6 +412,7 @@ function Sync:syncBook(book_path)
         )
         return { ok = true, books_synced = result.books_synced or 0 }
     else
+        logger.warn("BookStreak: syncBook — post failed, queuing")
         self.queue:enqueue(payload)
         return { ok = false, queued = true }
     end

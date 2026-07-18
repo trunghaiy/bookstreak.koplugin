@@ -1,5 +1,5 @@
 local DataStorage = require("datastorage")
-local json = require("json")
+local rapidjson = require("rapidjson")
 local logger = require("logger")
 
 local Queue = {}
@@ -18,7 +18,7 @@ function Queue:_load()
     local content = file:read("*all")
     file:close()
     if not content or content == "" then return {} end
-    local ok, data = pcall(json.decode, content)
+    local ok, data = pcall(rapidjson.decode, content)
     if ok and type(data) == "table" then
         return data
     end
@@ -31,7 +31,7 @@ function Queue:_save(items)
         logger.warn("BookStreak: Failed to write queue file")
         return
     end
-    file:write(json.encode(items))
+    file:write(rapidjson.encode(items))
     file:close()
 end
 

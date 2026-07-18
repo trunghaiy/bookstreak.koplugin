@@ -5,6 +5,18 @@ local DEFAULT_SERVER = "https://awttxrscondikadvmgua.supabase.co/functions/v1/ko
 
 local Settings = {}
 
+function Settings.normalizeSyncUrl(url)
+    if not url or url == "" then return DEFAULT_SERVER end
+    url = url:gsub("/$", "")
+    if url:match("/functions/v1/kosync$") then
+        return url:gsub("/kosync$", "/koreader-sync")
+    end
+    if not url:match("/koreader%-sync$") then
+        return url .. "/koreader-sync"
+    end
+    return url
+end
+
 function Settings:new()
     local o = {}
     setmetatable(o, { __index = self })
@@ -43,7 +55,7 @@ function Settings:isConfigured()
 end
 
 function Settings:getServerUrl()
-    return self:get("server_url")
+    return Settings.normalizeSyncUrl(self:get("server_url"))
 end
 
 function Settings:getUsername()

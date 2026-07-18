@@ -10,10 +10,11 @@ function SidecarReader:new()
 end
 
 function SidecarReader:_getSidecarPath(book_path)
-    -- KOReader sidecar convention: /path/to/book.epub.sdr/metadata.epub.lua
     local ext = book_path:match("%.([^%.]+)$")
     if not ext then return nil end
-    local sdr_dir = book_path .. ".sdr"
+    local DocSettings = require("docsettings")
+    local sdr_dir = DocSettings:getSidecarDir(book_path)
+    if not sdr_dir or sdr_dir == "" then return nil end
     local meta_file = sdr_dir .. "/metadata." .. ext .. ".lua"
     return meta_file, sdr_dir
 end

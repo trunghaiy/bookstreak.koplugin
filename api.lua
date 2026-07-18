@@ -1,7 +1,8 @@
 local https = require("ssl.https")
 local ltn12 = require("ltn12")
+local socket = require("socket")
 local socketutil = require("socketutil")
-local json = require("json")
+local rapidjson = require("rapidjson")
 local logger = require("logger")
 
 local VERSION = "0.1.0"
@@ -15,7 +16,7 @@ function Api:new(settings)
     return o
 end
 
-function Api:post(payload)
+function Api:post(payload, timeout)
     if not self.settings:isConfigured() then
         return nil, 0, "Not configured"
     end
@@ -24,12 +25,12 @@ function Api:post(payload)
     local username = self.settings:getUsername()
     local password = self.settings:getPassword()
 
-    local body = json.encode(payload)
+    local body = rapidjson.encode(payload)
     local response_chunks = {}
 
-    socketutil:set_timeout(10, 30)
+    socketutil:set_timeout(timeout or 30, timeout or 30)
 
-    local code, headers, status = https.request{
+    local code, headers, status = socket.skip(1, https.request{
         url = server_url,
         method = "POST",
         headers = {
@@ -41,12 +42,12 @@ function Api:post(payload)
         },
         source = ltn12.source.string(body),
         sink = ltn12.sink.table(response_chunks),
-    }
+    })
 
     socketutil:reset_timeout()
 
     if code == 200 then
-        local ok, result = pcall(json.decode, table.concat(response_chunks))
+        local ok, result = pcall(rapidjson.decode, table.concat(response_chunks))
         if ok then
             return result
         else
