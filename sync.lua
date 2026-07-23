@@ -5,8 +5,7 @@ local NetworkMgr = require("ui/network/manager")
 
 local Sync = {}
 
-local MAX_BOOKS_PER_PAYLOAD = 50
-local MAX_PAGES_PER_PAYLOAD = 10000
+local MAX_BOOKS_PER_CHUNK = 50
 
 function Sync:new(settings, api, queue, sidecar_reader)
     local o = {}
@@ -150,25 +149,13 @@ function Sync:_buildPayload(books, book_order, since_timestamp)
     local sync_annotations = self.settings:get("sync_annotations")
 
     local book_entries = {}
-    local total_pages = 0
 
     for _, md5 in ipairs(book_order) do
-        if #book_entries >= MAX_BOOKS_PER_PAYLOAD then break end
-        if total_pages >= MAX_PAGES_PER_PAYLOAD then break end
-
         local b = books[md5]
         local sessions = self:_groupByDate(b.page_stats)
 
-        -- Count pages in this book
-        for _, s in ipairs(sessions) do
-            total_pages = total_pages + #s.pages
-        end
-
         local annotations = {}
         if sync_annotations then
-            -- Try to find the book file path for sidecar reading
-            -- The statistics DB doesn't store file paths, so we search
-            -- using the book's md5 in KOReader's document settings
             annotations = self:_getAnnotationsForBook(b.md5, since_timestamp)
         end
 
@@ -259,7 +246,7 @@ function Sync:_getIsbnForBook(md5)
     return nil
 end
 
-function Sync:syncAll(full)
+function Sync:syncAll(full, on_progress)
     if not self.settings:isConfigured() then
         return { ok = false, error = "Not configured" }
     end
@@ -284,54 +271,79 @@ function Sync:syncAll(full)
     end
 
     local books, book_order = self:_groupByBook(rows)
-    local payload = self:_buildPayload(books, book_order, since)
+    local total_books = #book_order
 
-    logger.info("BookStreak: syncAll — payload:",
-        #payload.books, "books")
-    for _, b in ipairs(payload.books) do
-        local session_count = 0
-        local page_count = 0
-        local sessions = type(b.sessions) == "table" and b.sessions or {}
-        for _, s in ipairs(sessions) do
-            session_count = session_count + 1
-            local pages = type(s.pages) == "table" and s.pages or {}
-            page_count = page_count + #pages
-        end
-        local ann_count = type(b.annotations) == "table" and #b.annotations or 0
-        logger.info("BookStreak:   book:", b.title, "md5:", b.md5,
-            "sessions:", session_count, "pages:", page_count,
-            "annotations:", ann_count)
-    end
+    logger.info("BookStreak: syncAll —", total_books, "books to sync")
 
     if not NetworkMgr:isOnline() then
+        local payload = self:_buildPayload(books, book_order, since)
         self.queue:enqueue(payload)
         return { ok = true, queued = true, books_synced = 0, sessions_created = 0, annotations_created = 0 }
     end
 
-    local timeout = full and 120 or 30
-    local result = self.api:post(payload, timeout)
-    if result and result.status == "ok" then
-        logger.info("BookStreak: syncAll — server response: books_synced =",
-            result.books_synced, "sessions_created =", result.sessions_created,
-            "annotations_created =", result.annotations_created)
-        self.settings:recordSync(
-            result.server_time or os.time(),
-            result.books_synced or 0,
-            result.sessions_created or 0
-        )
-        self.queue:flush()
-        return {
-            ok = true,
-            books_synced = result.books_synced or 0,
-            books_unlinked = result.books_unlinked or 0,
-            sessions_created = result.sessions_created or 0,
-            annotations_created = result.annotations_created or 0,
-        }
-    else
-        logger.warn("BookStreak: syncAll — post failed, queuing payload")
-        self.queue:enqueue(payload)
-        return { ok = false, queued = true, error = "Sync failed, payload queued" }
+    local total_synced = 0
+    local total_unlinked = 0
+    local total_sessions = 0
+    local total_annotations = 0
+    local last_server_time = nil
+    local offset = 1
+
+    while offset <= total_books do
+        local chunk_order = {}
+        for i = offset, math.min(offset + MAX_BOOKS_PER_CHUNK - 1, total_books) do
+            table.insert(chunk_order, book_order[i])
+        end
+
+        local payload = self:_buildPayload(books, chunk_order, since)
+
+        logger.info("BookStreak: syncAll — sending chunk",
+            offset, "-", offset + #chunk_order - 1, "of", total_books)
+
+        if on_progress then
+            on_progress(offset - 1, total_books)
+        end
+
+        local timeout = full and 120 or 30
+        local result = self.api:post(payload, timeout)
+        if not result or result.status ~= "ok" then
+            logger.warn("BookStreak: syncAll — chunk failed, queuing")
+            self.queue:enqueue(payload)
+            return {
+                ok = false,
+                queued = true,
+                error = "Sync failed at book " .. offset,
+                books_synced = total_synced,
+                books_unlinked = total_unlinked,
+                sessions_created = total_sessions,
+                annotations_created = total_annotations,
+            }
+        end
+
+        total_synced = total_synced + (result.books_synced or 0)
+        total_unlinked = total_unlinked + (result.books_unlinked or 0)
+        total_sessions = total_sessions + (result.sessions_created or 0)
+        total_annotations = total_annotations + (result.annotations_created or 0)
+        last_server_time = result.server_time or os.time()
+
+        offset = offset + MAX_BOOKS_PER_CHUNK
     end
+
+    if last_server_time then
+        self.settings:recordSync(last_server_time, total_synced, total_sessions)
+        self.queue:flush()
+    end
+
+    logger.info("BookStreak: syncAll — complete: books_synced =",
+        total_synced, "sessions_created =", total_sessions,
+        "annotations_created =", total_annotations)
+
+    return {
+        ok = true,
+        books_synced = total_synced,
+        books_unlinked = total_unlinked,
+        sessions_created = total_sessions,
+        annotations_created = total_annotations,
+    }
 end
 
 function Sync:syncBook(book_path)

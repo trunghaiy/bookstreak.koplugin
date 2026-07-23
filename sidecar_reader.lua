@@ -55,7 +55,7 @@ function SidecarReader:getAnnotations(book_path, since_timestamp)
     local results = {}
     for _, ann in ipairs(annotations_list) do
         local ts = self:_parseTimestamp(ann.datetime)
-        if ts > since_timestamp then
+        if ts >= since_timestamp then
             local drawer = ann.drawer
             local note = ann.note
             local text = ann.text
@@ -81,6 +81,18 @@ function SidecarReader:getAnnotations(book_path, since_timestamp)
                 goto continue
             end
 
+            -- Annotations without datetime (older KOReader versions) get a
+            -- synthetic timestamp derived from page + text length so the
+            -- server RPC can use it as a stable dedup key.
+            local created_at = ann.datetime
+            if not created_at then
+                created_at = string.format(
+                    "1970-01-01 00:%02d:%02d",
+                    (ann.pageno or 0) % 60,
+                    #(ann.text or "") % 60
+                )
+            end
+
             table.insert(results, {
                 type = entry_type,
                 text = text or "",
@@ -88,7 +100,7 @@ function SidecarReader:getAnnotations(book_path, since_timestamp)
                 chapter = ann.chapter,
                 page = ann.pageno,
                 color = ann.color,
-                created_at = ann.datetime,
+                created_at = created_at,
             })
         end
         ::continue::

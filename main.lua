@@ -12,6 +12,7 @@ local Api = require("api")
 local Queue = require("queue")
 local SidecarReader = require("sidecar_reader")
 local Sync = require("sync")
+local PluginUpdater = require("updater")
 
 local BookStreakSync = WidgetContainer:extend{
     name = "bookstreaksync",
@@ -24,6 +25,11 @@ function BookStreakSync:init()
     self._queue = Queue:new(self._api)
     self._sidecar_reader = SidecarReader:new()
     self._sync = Sync:new(self._settings, self._api, self._queue, self._sidecar_reader)
+    self._updater = PluginUpdater:new(self._settings)
+
+    UIManager:nextTick(function()
+        self._updater:checkIfDue()
+    end)
 
     self.ui.menu:registerToMainMenu(self)
 end
@@ -94,6 +100,16 @@ function BookStreakSync:_buildMenu()
         },
         {
             text_func = function()
+                return T(_("Check for updates (v%1)"), self._updater:currentVersion())
+            end,
+            keep_menu_open = true,
+            callback = function()
+                self._updater:checkNow()
+            end,
+            separator = true,
+        },
+        {
+            text_func = function()
                 local url = self._settings:getServerUrl() or ""
                 local host = url:match("//([^/]+)") or url
                 if host == "" then host = "(not set)" end
@@ -131,8 +147,9 @@ function BookStreakSync:_buildMenu()
             text = _("About"),
             keep_menu_open = true,
             callback = function()
+                local plugin_meta = require("_meta")
                 UIManager:show(InfoMessage:new{
-                    text = T(_("BookStreak Sync v0.1.0\n\nSync your KOReader reading sessions to BookStreak automatically.\n\ngithub.com/bookstreak/bookstreak.koplugin")),
+                    text = T(_("BookStreak Sync v%1\n\nSync your KOReader reading sessions to BookStreak automatically.\n\ngithub.com/trunghaiy/bookstreak.koplugin"), plugin_meta.version),
                 })
             end,
         },
@@ -286,6 +303,14 @@ function BookStreakSync:_showStatus()
     UIManager:show(InfoMessage:new{ text = status_text })
 end
 
+function BookStreakSync:_flushStats()
+    local ReaderUI = require("apps/reader/readerui")
+    local instance = ReaderUI.instance
+    if instance and instance.statistics and instance.statistics.insertDB then
+        instance.statistics:insertDB()
+    end
+end
+
 function BookStreakSync:_doSyncAll()
     if not self._settings:isConfigured() then
         UIManager:show(InfoMessage:new{
@@ -294,12 +319,22 @@ function BookStreakSync:_doSyncAll()
         return
     end
 
-    local syncing_msg = InfoMessage:new{ text = _("Syncing..."), timeout = 30 }
+    self:_flushStats()
+
+    local syncing_msg = InfoMessage:new{ text = _("Syncing..."), timeout = 120 }
     UIManager:show(syncing_msg)
     UIManager:forceRePaint()
 
     UIManager:nextTick(function()
-        local result = self._sync:syncAll(true)
+        local result = self._sync:syncAll(true, function(synced_so_far, total)
+            UIManager:close(syncing_msg)
+            syncing_msg = InfoMessage:new{
+                text = T(_("Syncing %1 of %2 books..."), synced_so_far, total),
+                timeout = 120,
+            }
+            UIManager:show(syncing_msg)
+            UIManager:forceRePaint()
+        end)
         UIManager:close(syncing_msg)
         self:_showSyncResult(result)
     end)

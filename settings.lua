@@ -34,6 +34,8 @@ function Settings:get(key)
         last_sync_time = 0,
         last_sync_books = 0,
         last_sync_sessions = 0,
+        last_update_check = 0,
+        skipped_version = "",
     }
     local val = self._settings:readSetting(key)
     if val ~= nil then return val end

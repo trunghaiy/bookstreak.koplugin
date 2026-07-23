@@ -5,7 +5,7 @@ local socketutil = require("socketutil")
 local rapidjson = require("rapidjson")
 local logger = require("logger")
 
-local VERSION = "0.1.0"
+local meta = require("_meta")
 
 local Api = {}
 
@@ -38,7 +38,7 @@ function Api:post(payload, timeout)
             ["Content-Length"] = tostring(#body),
             ["x-auth-user"] = username,
             ["x-auth-key"] = password,
-            ["User-Agent"] = "bookstreak.koplugin/" .. VERSION,
+            ["User-Agent"] = "bookstreak.koplugin/" .. (meta.version or "0.0.0"),
         },
         source = ltn12.source.string(body),
         sink = ltn12.sink.table(response_chunks),
