@@ -1,6 +1,20 @@
 # Changelog
 
 
+
+## 0.2.1 (2026-07-26)
+
+- add v0.2.0 changelog entry
+
+## 0.2.0 (2026-07-26)
+
+- merge "Sync now" and "Sync status" into one menu item showing last sync time
+- auto-sync reading progress every 10 page turns with 30-second debounce
+- promote BookStreak Sync to tools menu (no longer buried in "More tools")
+- fix dead onOpenDocument handler (renamed to onReaderReady)
+- sync current book on device suspend
+- track sync failures for display in menu label
+
 ## 0.1.3 (2026-07-23)
 
 - strip markdown link syntax from update dialog release notes
