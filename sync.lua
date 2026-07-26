@@ -23,7 +23,10 @@ end
 
 function Sync:_getDeviceInfo()
     local Device = require("device")
-    local device_name = Device:info() or "unknown"
+    local device_name = Device.model or "unknown"
+    if device_name == "unknown" or device_name == "" then
+        device_name = (Device:info() or "unknown"):match("^([^\n]+)") or "unknown"
+    end
     local device_id = self.settings:get("device_id")
     if not device_id or device_id == "" then
         device_id = ("%s-%08x"):format(device_name:gsub("%s+", ""), math.random(0, 0xFFFFFFFF))

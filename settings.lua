@@ -34,6 +34,8 @@ function Settings:get(key)
         last_sync_time = 0,
         last_sync_books = 0,
         last_sync_sessions = 0,
+        last_sync_failed_time = 0,
+        last_sync_error = "",
         last_update_check = 0,
         skipped_version = "",
     }
@@ -76,7 +78,19 @@ function Settings:recordSync(server_time, books, sessions)
     self:set("last_sync_time", server_time)
     self:set("last_sync_books", books)
     self:set("last_sync_sessions", sessions)
+    self:set("last_sync_failed_time", 0)
+    self:set("last_sync_error", "")
     self:flush()
+end
+
+function Settings:recordSyncFailure(error_msg)
+    self:set("last_sync_failed_time", os.time())
+    self:set("last_sync_error", error_msg or "unknown error")
+    self:flush()
+end
+
+function Settings:getLastSyncFailedTime()
+    return self:get("last_sync_failed_time") or 0
 end
 
 return Settings

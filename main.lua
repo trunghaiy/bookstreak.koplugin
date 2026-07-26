@@ -14,9 +14,14 @@ local SidecarReader = require("sidecar_reader")
 local Sync = require("sync")
 local PluginUpdater = require("updater")
 
+local PAGES_BEFORE_SYNC = 10
+local AUTO_SYNC_DEBOUNCE_SECONDS = 30
+
 local BookStreakSync = WidgetContainer:extend{
     name = "bookstreaksync",
     is_doc_only = false,
+    _page_turn_counter = 0,
+    _periodic_sync_scheduled = false,
 }
 
 function BookStreakSync:init()
@@ -26,6 +31,14 @@ function BookStreakSync:init()
     self._sidecar_reader = SidecarReader:new()
     self._sync = Sync:new(self._settings, self._api, self._queue, self._sidecar_reader)
     self._updater = PluginUpdater:new(self._settings)
+
+    self._page_turn_counter = 0
+    self._periodic_sync_scheduled = false
+    self._periodic_sync_task = function()
+        self._periodic_sync_scheduled = false
+        self._page_turn_counter = 0
+        self:_doAutoSync()
+    end
 
     UIManager:nextTick(function()
         self._updater:checkIfDue()
@@ -37,7 +50,7 @@ end
 function BookStreakSync:addToMainMenu(menu_items)
     menu_items.bookstreak_sync = {
         text = _("BookStreak Sync"),
-        sorting_hint = "more_tools",
+        sorting_hint = "tools",
         sub_item_table = self:_buildMenu(),
     }
 end
@@ -58,22 +71,34 @@ function BookStreakSync:_buildMenu()
             separator = true,
         },
         {
-            text = _("Sync now"),
+            text_func = function()
+                if not self._settings:isConfigured() then
+                    return _("Sync now")
+                end
+                local failed_time = self._settings:getLastSyncFailedTime()
+                local success_time = self._settings:getLastSyncTime()
+
+                if failed_time > success_time and failed_time > 0 then
+                    local ago = self:_formatAgo(failed_time)
+                    if ago then
+                        return T(_("Sync now (failed %1)"), ago)
+                    end
+                end
+
+                if success_time > 0 then
+                    local ago = self:_formatAgo(success_time)
+                    if ago then
+                        return T(_("Sync now (synced %1)"), ago)
+                    end
+                end
+
+                return _("Sync now")
+            end,
             enabled_func = function()
                 return self._settings:isConfigured()
             end,
             callback = function()
                 self:_doSyncAll()
-            end,
-        },
-        {
-            text = _("Sync status"),
-            enabled_func = function()
-                return self._settings:isConfigured()
-            end,
-            keep_menu_open = true,
-            callback = function()
-                self:_showStatus()
             end,
             separator = true,
         },
@@ -95,16 +120,6 @@ function BookStreakSync:_buildMenu()
             callback = function()
                 self._settings:set("sync_annotations", not self._settings:get("sync_annotations"))
                 self._settings:flush()
-            end,
-            separator = true,
-        },
-        {
-            text_func = function()
-                return T(_("Check for updates (v%1)"), self._updater:currentVersion())
-            end,
-            keep_menu_open = true,
-            callback = function()
-                self._updater:checkNow()
             end,
             separator = true,
         },
@@ -142,6 +157,15 @@ function BookStreakSync:_buildMenu()
                 self:_editSetting("password", _("Password"), "")
             end,
             separator = true,
+        },
+        {
+            text_func = function()
+                return T(_("Check for updates (v%1)"), self._updater:currentVersion())
+            end,
+            keep_menu_open = true,
+            callback = function()
+                self._updater:checkNow()
+            end,
         },
         {
             text = _("About"),
@@ -271,6 +295,20 @@ function BookStreakSync:_exchangeCode(code)
     end
 end
 
+function BookStreakSync:_formatAgo(timestamp)
+    if not timestamp or timestamp == 0 then return nil end
+    local ago = os.time() - timestamp
+    if ago < 60 then
+        return _("just now")
+    elseif ago < 3600 then
+        return T(_("%1 min ago"), math.floor(ago / 60))
+    elseif ago < 86400 then
+        return T(_("%1 hours ago"), math.floor(ago / 3600))
+    else
+        return T(_("%1 days ago"), math.floor(ago / 86400))
+    end
+end
+
 function BookStreakSync:_showStatus()
     local last_time = self._settings:getLastSyncTime()
     local books = self._settings:get("last_sync_books") or 0
@@ -281,18 +319,7 @@ function BookStreakSync:_showStatus()
     if last_time == 0 then
         status_text = _("No sync yet.\n\nSet your username and password from the BookStreak app's KOReader Sync screen, then tap 'Sync now'.")
     else
-        local ago = os.time() - last_time
-        local ago_str
-        if ago < 60 then
-            ago_str = _("just now")
-        elseif ago < 3600 then
-            ago_str = T(_("%1 min ago"), math.floor(ago / 60))
-        elseif ago < 86400 then
-            ago_str = T(_("%1 hours ago"), math.floor(ago / 3600))
-        else
-            ago_str = T(_("%1 days ago"), math.floor(ago / 86400))
-        end
-
+        local ago_str = self:_formatAgo(last_time) or _("unknown")
         status_text = T(_("Last sync: %1\nBooks: %2 · Sessions: %3"), ago_str, books, sessions)
 
         if queue_size > 0 then
@@ -370,6 +397,7 @@ function BookStreakSync:_showSyncResult(result)
             UIManager:show(InfoMessage:new{ text = msg })
         end
     else
+        self._settings:recordSyncFailure(result.error)
         UIManager:show(InfoMessage:new{
             text = T(_("Sync failed: %1\n\nYour data has been queued and will retry automatically."), result.error or "unknown error"),
         })
@@ -378,7 +406,53 @@ end
 
 -- Lifecycle hooks
 
+function BookStreakSync:onPageUpdate(pageno)
+    if not self._settings:isConfigured() then return end
+    if pageno == nil then return end
+
+    self._page_turn_counter = self._page_turn_counter + 1
+
+    if self._periodic_sync_scheduled or self._page_turn_counter >= PAGES_BEFORE_SYNC then
+        self:schedulePeriodicSync()
+    end
+end
+
+function BookStreakSync:schedulePeriodicSync()
+    UIManager:unschedule(self._periodic_sync_task)
+    UIManager:scheduleIn(AUTO_SYNC_DEBOUNCE_SECONDS, self._periodic_sync_task)
+    self._periodic_sync_scheduled = true
+end
+
+function BookStreakSync:_doAutoSync()
+    if not self._settings:isConfigured() then return end
+
+    local book_path = self.ui and self.ui.document and self.ui.document.file
+    if not book_path then return end
+
+    self:_flushStats()
+
+    local result = self._sync:syncBook(book_path)
+    if result.ok and not result.queued and result.books_synced and result.books_synced > 0 then
+        logger.info("BookStreak: Auto-synced", result.books_synced, "books")
+    elseif result.queued then
+        logger.info("BookStreak: Auto-sync queued (offline)")
+    elseif not result.ok then
+        self._settings:recordSyncFailure(result.error)
+        logger.warn("BookStreak: Auto-sync failed:", result.error or "unknown")
+    end
+end
+
+function BookStreakSync:onCloseWidget()
+    UIManager:unschedule(self._periodic_sync_task)
+    self._periodic_sync_task = nil
+end
+
 function BookStreakSync:onCloseDocument()
+    -- Cancel any pending auto-sync
+    UIManager:unschedule(self._periodic_sync_task)
+    self._periodic_sync_scheduled = false
+    self._page_turn_counter = 0
+
     if not self._settings:get("sync_on_close") then return end
     if not self._settings:isConfigured() then return end
 
@@ -401,19 +475,39 @@ function BookStreakSync:onCloseDocument()
     end)
 end
 
-function BookStreakSync:onOpenDocument()
+function BookStreakSync:onSuspend()
+    if not self._settings:isConfigured() then return end
+
+    local book_path = self.ui and self.ui.document and self.ui.document.file
+    if not book_path then return end
+
+    -- Cancel any pending auto-sync — we're syncing now
+    UIManager:unschedule(self._periodic_sync_task)
+    self._periodic_sync_scheduled = false
+    self._page_turn_counter = 0
+
+    self:_flushStats()
+
+    local result = self._sync:syncBook(book_path)
+    if result.ok and not result.queued and result.books_synced and result.books_synced > 0 then
+        logger.info("BookStreak: Synced on suspend")
+    elseif result.queued then
+        logger.info("BookStreak: Queued sync on suspend")
+    end
+end
+
+function BookStreakSync:onReaderReady()
     if not self._settings:isConfigured() then return end
 
     UIManager:nextTick(function()
         local result = self._sync:syncAll()
         if result.ok and not result.queued and result.books_synced and result.books_synced > 0 then
-            logger.info("BookStreak: Synced on document open —", result.books_synced, "books")
+            logger.info("BookStreak: Synced on reader ready —", result.books_synced, "books")
         end
-        -- Also flush any queued payloads
         if NetworkMgr:isOnline() and self._queue:size() > 0 then
             local sent = self._queue:flush()
             if sent > 0 then
-                logger.info("BookStreak: Flushed", sent, "queued payloads on document open")
+                logger.info("BookStreak: Flushed", sent, "queued payloads on reader ready")
             end
         end
     end)
