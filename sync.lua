@@ -147,22 +147,46 @@ function Sync:_groupByDate(page_stats)
     return sessions
 end
 
-function Sync:_buildPayload(books, book_order, since_timestamp)
+function Sync:_buildHistoryMap()
+    local DocSettings = require("docsettings")
+    local map = {}
+    local history_path = DataStorage:getDataDir() .. "/history.lua"
+    local ok_load, history = pcall(dofile, history_path)
+    if not ok_load or type(history) ~= "table" then return map end
+
+    for _, entry in ipairs(history) do
+        local file_path = entry.file
+        if file_path then
+            local ok, doc_sidecar = pcall(DocSettings.open, DocSettings, file_path)
+            if ok and doc_sidecar then
+                local doc_md5 = doc_sidecar:readSetting("partial_md5_checksum")
+                if doc_md5 then
+                    map[doc_md5] = file_path
+                end
+            end
+        end
+    end
+    return map
+end
+
+function Sync:_buildPayload(books, book_order, since_timestamp, md5_to_path)
     local device_name, device_id = self:_getDeviceInfo()
     local sync_annotations = self.settings:get("sync_annotations")
+    md5_to_path = md5_to_path or self:_buildHistoryMap()
 
     local book_entries = {}
 
     for _, md5 in ipairs(book_order) do
         local b = books[md5]
         local sessions = self:_groupByDate(b.page_stats)
+        local file_path = md5_to_path[md5]
 
         local annotations = {}
-        if sync_annotations then
-            annotations = self:_getAnnotationsForBook(b.md5, since_timestamp)
+        if sync_annotations and file_path then
+            annotations = self.sidecar_reader:getAnnotations(file_path, since_timestamp)
         end
 
-        local isbn = self:_getIsbnForBook(b.md5)
+        local isbn = self:_getIsbnForBook(md5, file_path)
 
         table.insert(book_entries, {
             md5 = b.md5,
@@ -184,69 +208,41 @@ function Sync:_buildPayload(books, book_order, since_timestamp)
     }
 end
 
-function Sync:_getAnnotationsForBook(md5, since_timestamp)
-    local DocSettings = require("docsettings")
+function Sync:_extractIsbnFromProps(doc_props)
+    if type(doc_props) ~= "table" then return nil end
 
-    local history_path = DataStorage:getDataDir() .. "/history.lua"
-    local ok_load, history = pcall(dofile, history_path)
-    if not ok_load or type(history) ~= "table" then return {} end
-
-    for _, entry in ipairs(history) do
-        local file_path = entry.file
-        if file_path then
-            local ok, doc_sidecar = pcall(DocSettings.open, DocSettings, file_path)
-            if ok and doc_sidecar then
-                local doc_md5 = doc_sidecar:readSetting("partial_md5_checksum")
-                if doc_md5 == md5 then
-                    return self.sidecar_reader:getAnnotations(file_path, since_timestamp)
-                end
-            end
+    -- KOReader stores identifiers as a table: {isbn = "978...", uuid = "..."}
+    if doc_props.identifiers and type(doc_props.identifiers) == "table" then
+        local isbn_val = doc_props.identifiers.isbn or doc_props.identifiers.ISBN
+        if isbn_val and tostring(isbn_val) ~= "" then
+            return tostring(isbn_val):gsub("-", "")
         end
     end
 
-    return {}
-end
+    -- CREngine returns identifiers as a newline-separated string
+    -- e.g. "isbn:9781250875068\namazon:B09QT1HQKP\ngoodreads:60452368"
+    if doc_props.identifiers and type(doc_props.identifiers) == "string" then
+        local isbn = doc_props.identifiers:lower():match("isbn:(%d[%dxx-]+)")
+        if isbn then return isbn:gsub("-", "") end
+    end
 
-function Sync:_getIsbnForBook(md5)
-    local DocSettings = require("docsettings")
-
-    local history_path = DataStorage:getDataDir() .. "/history.lua"
-    local ok_load, history = pcall(dofile, history_path)
-    if not ok_load or type(history) ~= "table" then return nil end
-
-    for _, entry in ipairs(history) do
-        local file_path = entry.file
-        if file_path then
-            local ok, doc_sidecar = pcall(DocSettings.open, DocSettings, file_path)
-            if ok and doc_sidecar then
-                local doc_md5 = doc_sidecar:readSetting("partial_md5_checksum")
-                if doc_md5 == md5 then
-                    local doc_props = doc_sidecar:readSetting("doc_props")
-                    if type(doc_props) == "table" then
-                        -- KOReader stores identifiers as a table: {isbn = "978...", uuid = "..."}
-                        if doc_props.identifiers and type(doc_props.identifiers) == "table" then
-                            local isbn_val = doc_props.identifiers.isbn or doc_props.identifiers.ISBN
-                            if isbn_val and tostring(isbn_val) ~= "" then
-                                return tostring(isbn_val):gsub("-", "")
-                            end
-                        end
-                        -- Fall back to identifiers as a string (e.g. "ISBN:978-0-307-46376-0")
-                        if doc_props.identifiers and type(doc_props.identifiers) == "string" then
-                            local isbn = doc_props.identifiers:lower():match("isbn:(%d[%dxx-]+)")
-                            if isbn then return isbn:gsub("-", "") end
-                        end
-                        -- Fall back to direct isbn field
-                        if doc_props.isbn and doc_props.isbn ~= "" then
-                            return tostring(doc_props.isbn):gsub("-", "")
-                        end
-                    end
-                    return nil
-                end
-            end
-        end
+    -- Fall back to direct isbn field
+    if doc_props.isbn and doc_props.isbn ~= "" then
+        return tostring(doc_props.isbn):gsub("-", "")
     end
 
     return nil
+end
+
+function Sync:_getIsbnForBook(md5, file_path)
+    if not file_path then return nil end
+
+    local DocSettings = require("docsettings")
+    local ok, doc_sidecar = pcall(DocSettings.open, DocSettings, file_path)
+    if not ok or not doc_sidecar then return nil end
+
+    local doc_props = doc_sidecar:readSetting("doc_props")
+    return self:_extractIsbnFromProps(doc_props)
 end
 
 function Sync:syncAll(full, on_progress)
@@ -278,8 +274,10 @@ function Sync:syncAll(full, on_progress)
 
     logger.info("BookStreak: syncAll —", total_books, "books to sync")
 
+    local md5_to_path = self:_buildHistoryMap()
+
     if not NetworkMgr:isOnline() then
-        local payload = self:_buildPayload(books, book_order, since)
+        local payload = self:_buildPayload(books, book_order, since, md5_to_path)
         self.queue:enqueue(payload)
         return { ok = true, queued = true, books_synced = 0, sessions_created = 0, annotations_created = 0 }
     end
@@ -297,7 +295,7 @@ function Sync:syncAll(full, on_progress)
             table.insert(chunk_order, book_order[i])
         end
 
-        local payload = self:_buildPayload(books, chunk_order, since)
+        local payload = self:_buildPayload(books, chunk_order, since, md5_to_path)
 
         logger.info("BookStreak: syncAll — sending chunk",
             offset, "-", offset + #chunk_order - 1, "of", total_books)
@@ -393,7 +391,8 @@ function Sync:syncBook(book_path)
     end
 
     local books, book_order = self:_groupByBook(book_rows)
-    local payload = self:_buildPayload(books, book_order, since)
+    local md5_to_path = { [md5] = book_path }
+    local payload = self:_buildPayload(books, book_order, since, md5_to_path)
 
     for _, b in ipairs(payload.books) do
         local session_count = 0

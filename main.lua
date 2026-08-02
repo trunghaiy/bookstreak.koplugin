@@ -14,7 +14,7 @@ local SidecarReader = require("sidecar_reader")
 local Sync = require("sync")
 local PluginUpdater = require("updater")
 
-local PAGES_BEFORE_SYNC = 10
+local PAGES_BEFORE_SYNC = 25
 local AUTO_SYNC_DEBOUNCE_SECONDS = 30
 
 local BookStreakSync = WidgetContainer:extend{

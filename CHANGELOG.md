@@ -2,9 +2,11 @@
 
 
 
-## 0.2.1 (2026-07-26)
+## 1.0.0 (2026-08-02)
 
-- add v0.2.0 changelog entry
+- pull server-side changes on cold start, reduce auto-sync noise
+- wip: save in-progress plugin sync.lua changes before subagent work
+- Bump a dump version to fix metadata
 
 ## 0.2.0 (2026-07-26)
 
