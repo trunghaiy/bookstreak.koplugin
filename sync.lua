@@ -7,6 +7,15 @@ local Sync = {}
 
 local MAX_BOOKS_PER_CHUNK = 50
 
+local function cleanSeriesName(raw)
+    if not raw or raw == "" then return nil end
+    local name, pos = raw:match("^(.-)%s*,?%s*#(%d[%d%.%-]*)%s*$")
+    if name and name ~= "" then return name, pos end
+    name, pos = raw:match("^(.-)%s+[Bb]ook%s+(%d+)%s*$")
+    if name and name ~= "" then return name, pos end
+    return raw, nil
+end
+
 function Sync:new(settings, api, queue, sidecar_reader)
     local o = {}
     setmetatable(o, { __index = self })
@@ -188,12 +197,14 @@ function Sync:_buildPayload(books, book_order, since_timestamp, md5_to_path)
 
         local isbn = self:_getIsbnForBook(md5, file_path)
 
+        local clean_series, series_position = cleanSeriesName(b.series)
+
         table.insert(book_entries, {
             md5 = b.md5,
             title = b.title,
             authors = b.authors,
             pages = b.pages,
-            series = b.series,
+            series = clean_series,
             isbn = isbn,
             sessions = sessions,
             annotations = annotations,

@@ -2,11 +2,24 @@
 
 
 
+
+## 1.0.1 (2026-08-28)
+
+- clean series names at plugin source before sync
+- Correct changelog for koreader plugin
+
 ## 1.0.0 (2026-08-02)
 
-- pull server-side changes on cold start, reduce auto-sync noise
-- wip: save in-progress plugin sync.lua changes before subagent work
-- Bump a dump version to fix metadata
+### Performance
+- Build history map once per sync instead of scanning history.lua per book — O(1) lookups for annotations and ISBN extraction, significantly faster for large libraries
+
+### Improvements
+- Raise auto-sync page threshold from 10 to 25 turns to reduce session fragmentation (fewer duplicate sessions from incremental syncs during long reading sittings)
+- Support CREngine string-format identifiers for ISBN extraction (e.g. `isbn:978...` in newline-separated strings)
+
+### Refactoring
+- Extract `_buildHistoryMap()` for shared md5→file_path resolution across annotations and ISBN lookup
+- Extract `_extractIsbnFromProps()` for cleaner, testable ISBN parsing from doc_props
 
 ## 0.2.0 (2026-07-26)
 
