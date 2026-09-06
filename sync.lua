@@ -112,8 +112,8 @@ function Sync:_groupByBook(rows)
             table.insert(book_order, md5)
         end
 
-        -- Prefer psd.total_pages (reflow-accurate) over book.pages (static)
-        if row.total_pages and row.total_pages > 0 then
+        if (not books[md5].pages or books[md5].pages == 0)
+            and row.total_pages and row.total_pages > 0 then
             books[md5].pages = row.total_pages
         end
 

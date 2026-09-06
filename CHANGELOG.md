@@ -3,6 +3,10 @@
 
 
 
+## 1.0.2 (2026-09-06)
+
+- fix false "Finished" status on reflowable eBooks — use static book.pages instead of reflow-variable psd.total_pages for page count
+
 ## 1.0.1 (2026-08-28)
 
 - clean series names at plugin source before sync
