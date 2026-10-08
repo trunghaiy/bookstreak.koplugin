@@ -373,14 +373,15 @@ function BookStreakSync:_showSyncResult(result)
             UIManager:show(InfoMessage:new{
                 text = _("No WiFi available. Reading data queued and will sync when you're online."),
             })
-        elseif result.books_synced == 0 and (result.books_unlinked or 0) == 0 then
+        elseif (result.books_synced or 0) + (result.books_unlinked or 0) == 0 then
             UIManager:show(InfoMessage:new{
                 text = _("Already up to date. No new reading data to sync."),
             })
         else
+            local total_books = (result.books_synced or 0) + (result.books_unlinked or 0)
             local parts = {}
-            if result.books_synced > 0 then
-                table.insert(parts, T(_("%1 books synced"), result.books_synced))
+            if total_books > 0 then
+                table.insert(parts, T(_("%1 books synced"), total_books))
             end
             if result.sessions_created > 0 then
                 table.insert(parts, T(_("%1 sessions"), result.sessions_created))
@@ -389,23 +390,19 @@ function BookStreakSync:_showSyncResult(result)
                 table.insert(parts, T(_("%1 annotations"), result.annotations_created))
             end
             local msg = table.concat(parts, ", ")
-            if (result.books_unlinked or 0) > 0 then
-                if msg ~= "" then msg = msg .. "\n\n" end
-                msg = msg .. T(_("%1 books need linking in the BookStreak app. Open Settings > KOReader Sync to match them to your library."), result.books_unlinked)
-            end
 
             local errored_books = result.errored_books or {}
             if #errored_books > 0 then
                 if msg ~= "" then msg = msg .. "\n\n" end
                 local book_list = table.concat(errored_books, ", ")
-                msg = msg .. T(_("Could not sync: %1\n\nTap 'Sync now' again. If the problem persists, try a full sync."), book_list)
+                msg = msg .. T(_("Could not sync: %1\n\nTap 'Sync now' to retry. If the issue persists, email support@bookstreak.quest."), book_list)
             end
 
             local skipped_books = result.annotations_skipped_books or {}
             if #skipped_books > 0 then
                 if msg ~= "" then msg = msg .. "\n\n" end
                 local book_list = table.concat(skipped_books, ", ")
-                msg = msg .. T(_("Highlights could not be read for: %1\n\nOpen each book briefly in KOReader so it appears in your reading history, then sync again."), book_list)
+                msg = msg .. T(_("Annotations could not be read for: %1\n\nOpen each book briefly in KOReader, then sync again."), book_list)
             end
 
             if msg == "" then msg = _("Sync complete.") end
@@ -414,7 +411,7 @@ function BookStreakSync:_showSyncResult(result)
     else
         self._settings:recordSyncFailure(result.error)
         UIManager:show(InfoMessage:new{
-            text = T(_("Sync failed: %1\n\nYour data has been queued and will retry automatically."), result.error or "unknown error"),
+            text = T(_("Sync failed: %1\n\nYour data has been queued. Tap 'Sync now' to retry."), result.error or "unknown error"),
         })
     end
 end

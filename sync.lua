@@ -7,14 +7,6 @@ local Sync = {}
 
 local MAX_BOOKS_PER_CHUNK = 50
 
-local function cleanSeriesName(raw)
-    if not raw or raw == "" then return nil end
-    local name, pos = raw:match("^(.-)%s*,?%s*#(%d[%d%.%-]*)%s*$")
-    if name and name ~= "" then return name, pos end
-    name, pos = raw:match("^(.-)%s+[Bb]ook%s+(%d+)%s*$")
-    if name and name ~= "" then return name, pos end
-    return raw, nil
-end
 
 function Sync:new(settings, api, queue, sidecar_reader)
     local o = {}
@@ -163,26 +155,86 @@ end
 
 function Sync:_buildHistoryMap()
     local DocSettings = require("docsettings")
+    local lfs = require("libs/libkoreader-lfs")
     local map = {}
+
+    -- Source 1: history.lua (primary — covers actively read books)
     local history_path = DataStorage:getDataDir() .. "/history.lua"
     local ok_load, history = pcall(dofile, history_path)
-    if not ok_load or type(history) ~= "table" then return map end
-
-    for _, entry in ipairs(history) do
-        local file_path = entry.file
-        if file_path then
-            local ok, doc_sidecar = pcall(DocSettings.open, DocSettings, file_path)
-            if ok and doc_sidecar then
-                local doc_md5 = doc_sidecar:readSetting("partial_md5_checksum")
-                if doc_md5 then
-                    map[doc_md5] = file_path
+    if ok_load and type(history) == "table" then
+        for _, entry in ipairs(history) do
+            local file_path = entry.file
+            if file_path then
+                local ok, doc_sidecar = pcall(DocSettings.open, DocSettings, file_path)
+                if ok and doc_sidecar then
+                    local doc_md5 = doc_sidecar:readSetting("partial_md5_checksum")
+                    if doc_md5 then
+                        map[doc_md5] = file_path
+                    end
                 end
             end
         end
     end
-    local count = 0
-    for _ in pairs(map) do count = count + 1 end
-    logger.info("BookStreak: _buildHistoryMap — total md5→path entries:", count)
+    local history_count = 0
+    for _ in pairs(map) do history_count = history_count + 1 end
+
+    -- Source 2: legacy history directory (catches books removed from history.lua)
+    local history_dir = DataStorage:getHistoryDir()
+    if history_dir and lfs.attributes(history_dir, "mode") == "directory" then
+        for f in lfs.dir(history_dir) do
+            if f:sub(-4) == ".lua" and f:sub(-8) ~= ".old.lua" then
+                local file_path = DocSettings:getFileFromHistory(f)
+                if file_path and lfs.attributes(file_path, "mode") == "file" then
+                    local ok, doc_sidecar = pcall(DocSettings.open, DocSettings, file_path)
+                    if ok and doc_sidecar then
+                        local doc_md5 = doc_sidecar:readSetting("partial_md5_checksum")
+                        if doc_md5 and not map[doc_md5] then
+                            map[doc_md5] = file_path
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Source 3: hash-based sdr storage (catches books with no history entry)
+    local ok_hash, hash_dir = pcall(function() return DataStorage:getDocSettingsHashDir() end)
+    if ok_hash and hash_dir and lfs.attributes(hash_dir, "mode") == "directory" then
+        for subdir in lfs.dir(hash_dir) do
+            if subdir ~= "." and subdir ~= ".." then
+                local subdir_path = hash_dir .. "/" .. subdir
+                if lfs.attributes(subdir_path, "mode") == "directory" then
+                    for sdr_entry in lfs.dir(subdir_path) do
+                        if sdr_entry:sub(-4) == ".sdr" then
+                            local md5_hash = sdr_entry:sub(1, -5)
+                            if not map[md5_hash] then
+                                local sdr_path = subdir_path .. "/" .. sdr_entry
+                                -- Read metadata files inside sdr to find doc_path
+                                for meta_file in lfs.dir(sdr_path) do
+                                    if meta_file:match("^metadata%.") and meta_file:sub(-4) == ".lua"
+                                        and not meta_file:match("%.old$") then
+                                        local meta_path = sdr_path .. "/" .. meta_file
+                                        local ok_meta, meta = pcall(dofile, meta_path)
+                                        if ok_meta and type(meta) == "table" and meta.doc_path then
+                                            if lfs.attributes(meta.doc_path, "mode") == "file" then
+                                                map[md5_hash] = meta.doc_path
+                                            end
+                                        end
+                                        break
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local total_count = 0
+    for _ in pairs(map) do total_count = total_count + 1 end
+    logger.info("BookStreak: _buildHistoryMap — entries: history=" .. history_count
+        .. " total=" .. total_count)
     return map
 end
 
@@ -222,14 +274,12 @@ function Sync:_buildPayload(books, book_order, since_timestamp, md5_to_path)
 
         local isbn = self:_getIsbnForBook(md5, file_path)
 
-        local clean_series, series_position = cleanSeriesName(b.series)
-
         table.insert(book_entries, {
             md5 = b.md5,
             title = b.title,
             authors = b.authors,
             pages = b.pages,
-            series = clean_series,
+            series = b.series,
             isbn = isbn,
             sessions = sessions,
             annotations = annotations,

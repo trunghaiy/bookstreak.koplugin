@@ -2,6 +2,14 @@
 
 
 
+## 1.0.4 (2026-10-08)
+
+- sync standalone notes (not attached to highlights) as separate entries
+- fix history map crash when sidecar file is missing or malformed
+- fix series_position not syncing for books in a series
+- update skipped-annotations message to mention notes support
+- remove misleading "try a full sync" from error messages
+- add support email to sync error messages for easier troubleshooting
 
 
 ## 1.0.3 (2026-10-08)
