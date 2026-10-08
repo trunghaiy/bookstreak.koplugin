@@ -3,6 +3,12 @@
 
 
 
+
+## 1.0.3 (2026-10-08)
+
+- fix Invalid Date in journal + surface annotation sync gaps
+- fix 8 wrong column refs in process_koreader_book RPC
+
 ## 1.0.2 (2026-09-06)
 
 - fix false "Finished" status on reflowable eBooks — use static book.pages instead of reflow-variable psd.total_pages for page count

@@ -34,10 +34,12 @@ end
 
 function SidecarReader:getAnnotations(book_path, since_timestamp)
     local meta_path = self:_getSidecarPath(book_path)
+    logger.info("BookStreak: getAnnotations — meta_path =", meta_path or "nil")
     if not meta_path then return {} end
 
     -- Check file exists
     local attr = lfs.attributes(meta_path)
+    logger.info("BookStreak: getAnnotations — file exists =", attr ~= nil)
     if not attr then return {} end
 
     -- Load the Lua table (standard KOReader pattern)
@@ -49,8 +51,11 @@ function SidecarReader:getAnnotations(book_path, since_timestamp)
 
     local annotations_list = metadata.annotations
     if not annotations_list or type(annotations_list) ~= "table" then
+        logger.info("BookStreak: getAnnotations — no annotations table in metadata")
         return {}
     end
+
+    logger.info("BookStreak: getAnnotations — total annotations in metadata:", #annotations_list)
 
     local results = {}
     for _, ann in ipairs(annotations_list) do
@@ -105,6 +110,8 @@ function SidecarReader:getAnnotations(book_path, since_timestamp)
         end
         ::continue::
     end
+
+    logger.info("BookStreak: getAnnotations — after since_timestamp filter:", #results)
 
     return results
 end

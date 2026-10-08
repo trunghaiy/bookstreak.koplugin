@@ -393,6 +393,21 @@ function BookStreakSync:_showSyncResult(result)
                 if msg ~= "" then msg = msg .. "\n\n" end
                 msg = msg .. T(_("%1 books need linking in the BookStreak app. Open Settings > KOReader Sync to match them to your library."), result.books_unlinked)
             end
+
+            local errored_books = result.errored_books or {}
+            if #errored_books > 0 then
+                if msg ~= "" then msg = msg .. "\n\n" end
+                local book_list = table.concat(errored_books, ", ")
+                msg = msg .. T(_("Could not sync: %1\n\nTap 'Sync now' again. If the problem persists, try a full sync."), book_list)
+            end
+
+            local skipped_books = result.annotations_skipped_books or {}
+            if #skipped_books > 0 then
+                if msg ~= "" then msg = msg .. "\n\n" end
+                local book_list = table.concat(skipped_books, ", ")
+                msg = msg .. T(_("Highlights could not be read for: %1\n\nOpen each book briefly in KOReader so it appears in your reading history, then sync again."), book_list)
+            end
+
             if msg == "" then msg = _("Sync complete.") end
             UIManager:show(InfoMessage:new{ text = msg })
         end

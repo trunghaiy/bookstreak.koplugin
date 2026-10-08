@@ -58,7 +58,8 @@ function Sync:_queryNewPageStats(since_timestamp)
         local results = {}
         local stmt = conn:prepare([[
             SELECT psd.id_book, psd.page, psd.start_time, psd.duration, psd.total_pages,
-                   b.title, b.authors, b.pages, b.series, b.md5
+                   b.title, b.authors, b.pages, b.series, b.md5,
+                   b.notes, b.highlights
             FROM page_stat_data psd
             JOIN book b ON b.id = psd.id_book
             WHERE psd.start_time > ?
@@ -77,6 +78,8 @@ function Sync:_queryNewPageStats(since_timestamp)
                 pages = tonumber(row[8]),
                 series = row[9] and tostring(row[9]) or nil,
                 md5 = row[10] and tostring(row[10]) or nil,
+                notes = tonumber(row[11]) or 0,
+                highlights = tonumber(row[12]) or 0,
             })
         end
         return results
@@ -108,6 +111,8 @@ function Sync:_groupByBook(rows)
                 pages = row.pages,
                 series = row.series,
                 page_stats = {},
+                notes = row.notes or 0,
+                highlights = row.highlights or 0,
             }
             table.insert(book_order, md5)
         end
@@ -175,6 +180,9 @@ function Sync:_buildHistoryMap()
             end
         end
     end
+    local count = 0
+    for _ in pairs(map) do count = count + 1 end
+    logger.info("BookStreak: _buildHistoryMap — total md5→path entries:", count)
     return map
 end
 
@@ -183,17 +191,34 @@ function Sync:_buildPayload(books, book_order, since_timestamp, md5_to_path)
     local sync_annotations = self.settings:get("sync_annotations")
     md5_to_path = md5_to_path or self:_buildHistoryMap()
 
+    logger.info("BookStreak: _buildPayload — sync_annotations =", sync_annotations and true or false)
+
     local book_entries = {}
+    local total_annotations_sent = 0
+    local annotations_skipped_books = {}
 
     for _, md5 in ipairs(book_order) do
         local b = books[md5]
         local sessions = self:_groupByDate(b.page_stats)
         local file_path = md5_to_path[md5]
 
+        logger.info("BookStreak: _buildPayload — md5 =", md5, "file_path =", file_path or "nil")
+
         local annotations = {}
         if sync_annotations and file_path then
             annotations = self.sidecar_reader:getAnnotations(file_path, since_timestamp)
+            logger.info("BookStreak: _buildPayload — annotations returned:", #annotations, "for", md5)
+        elseif sync_annotations and not file_path then
+            local known_count = (b.highlights or 0) + (b.notes or 0)
+            if known_count > 0 then
+                logger.warn("BookStreak: _buildPayload — cannot sync annotations for",
+                    b.title, "— file not in reading history.",
+                    "Known highlights:", b.highlights, "notes:", b.notes)
+                table.insert(annotations_skipped_books, b.title)
+            end
         end
+
+        total_annotations_sent = total_annotations_sent + #annotations
 
         local isbn = self:_getIsbnForBook(md5, file_path)
 
@@ -216,6 +241,8 @@ function Sync:_buildPayload(books, book_order, since_timestamp, md5_to_path)
         device_id = device_id,
         books = book_entries,
         last_sync_time = since_timestamp,
+        annotations_sent = total_annotations_sent,
+        annotations_skipped_books = annotations_skipped_books,
     }
 end
 
@@ -297,6 +324,10 @@ function Sync:syncAll(full, on_progress)
     local total_unlinked = 0
     local total_sessions = 0
     local total_annotations = 0
+    local total_annotations_sent = 0
+    local total_errored = 0
+    local all_errored_books = {}
+    local all_skipped_books = {}
     local last_server_time = nil
     local offset = 1
 
@@ -307,6 +338,10 @@ function Sync:syncAll(full, on_progress)
         end
 
         local payload = self:_buildPayload(books, chunk_order, since, md5_to_path)
+        total_annotations_sent = total_annotations_sent + (payload.annotations_sent or 0)
+        for _, title in ipairs(payload.annotations_skipped_books or {}) do
+            table.insert(all_skipped_books, title)
+        end
 
         logger.info("BookStreak: syncAll — sending chunk",
             offset, "-", offset + #chunk_order - 1, "of", total_books)
@@ -337,6 +372,20 @@ function Sync:syncAll(full, on_progress)
         total_annotations = total_annotations + (result.annotations_created or 0)
         last_server_time = result.server_time or os.time()
 
+        if result.books_errored and result.books_errored > 0 then
+            total_errored = total_errored + result.books_errored
+            logger.warn("BookStreak: syncAll —", result.books_errored, "books errored in this chunk")
+            if result.error_details then
+                for _, detail in ipairs(result.error_details) do
+                    logger.warn("BookStreak: error_detail:", detail)
+                    local book_name = detail:match("^(.-):")
+                    if book_name and book_name ~= "" then
+                        table.insert(all_errored_books, book_name)
+                    end
+                end
+            end
+        end
+
         offset = offset + MAX_BOOKS_PER_CHUNK
     end
 
@@ -347,7 +396,8 @@ function Sync:syncAll(full, on_progress)
 
     logger.info("BookStreak: syncAll — complete: books_synced =",
         total_synced, "sessions_created =", total_sessions,
-        "annotations_created =", total_annotations)
+        "annotations_created =", total_annotations,
+        "annotations_sent =", total_annotations_sent)
 
     return {
         ok = true,
@@ -355,6 +405,10 @@ function Sync:syncAll(full, on_progress)
         books_unlinked = total_unlinked,
         sessions_created = total_sessions,
         annotations_created = total_annotations,
+        annotations_sent = total_annotations_sent,
+        annotations_skipped_books = all_skipped_books,
+        books_errored = total_errored,
+        errored_books = all_errored_books,
     }
 end
 
@@ -425,17 +479,25 @@ function Sync:syncBook(book_path)
         return { ok = true, queued = true }
     end
 
+    local annotations_sent = payload.annotations_sent or 0
     local result = self.api:post(payload)
     if result and result.status == "ok" then
         logger.info("BookStreak: syncBook — server: books_synced =",
             result.books_synced, "sessions_created =", result.sessions_created,
-            "annotations_created =", result.annotations_created)
+            "annotations_created =", result.annotations_created,
+            "annotations_sent =", annotations_sent)
         self.settings:recordSync(
             result.server_time or os.time(),
             result.books_synced or 0,
             result.sessions_created or 0
         )
-        return { ok = true, books_synced = result.books_synced or 0 }
+        return {
+            ok = true,
+            books_synced = result.books_synced or 0,
+            annotations_created = result.annotations_created or 0,
+            annotations_sent = annotations_sent,
+            annotations_skipped_books = payload.annotations_skipped_books or {},
+        }
     else
         logger.warn("BookStreak: syncBook — post failed, queuing")
         self.queue:enqueue(payload)
